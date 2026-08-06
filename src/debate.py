@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from src.llm import LLMClient
 from src.agent import DebateAgent, AgentConfig, get_default_agents
+from src.stats import DebateStats
 
 
 @dataclass
@@ -57,24 +58,31 @@ class DebateCoordinator:
     """
     辩论协调器。控制发言顺序和轮数。
 
-    max_rounds: 方案提出者和批评者各发言的次数(默认2, 即来回2轮+裁判)
+    max_rounds: proposer和critic各发言的次数(默认2, 即来回2round + judge)
+    agent_configs: 自定义角色配置, 传None用默认三角色
     """
 
-    def __init__(self, llm: LLMClient, max_rounds: int = 2):
+    def __init__(self, llm: LLMClient, max_rounds: int = 2,
+                 agent_configs: List[AgentConfig] = None):
         self.llm = llm
         self.max_rounds = max_rounds
-        self.agents = self._create_agents()
+        self.stats = DebateStats()
+        self.agents = self._create_agents(agent_configs)
 
-    def _create_agents(self) -> Dict[str, DebateAgent]:
-        configs = get_default_agents()
+    def _create_agents(self, configs: List[AgentConfig] = None
+                       ) -> Dict[str, DebateAgent]:
+        if configs is None:
+            configs = get_default_agents()
         return {
             cfg.role: DebateAgent(cfg, self.llm)
             for cfg in configs
         }
 
     def run(self, topic: str, verbose: bool = True) -> DebateResult:
-        """同步执行辩论"""
+        """同步执行辩论, 带stats追踪"""
         result = DebateResult(topic=topic)
+        self.stats = DebateStats(topic=topic)
+        self.stats.start()
 
         proposer = self.agents["proposer"]
         critic = self.agents["critic"]
@@ -84,9 +92,10 @@ class DebateCoordinator:
             print(f"辩论话题: {topic}")
             print("=" * 50)
 
-        # Round 1: 方案提出者首次发言
+        # Round 1: proposer首次发言
         msg = proposer.speak(topic)
         result.rounds.append(DebateRound(1, proposer.name, msg))
+        self.stats.record_speech(proposer.name, msg)
         critic.hear(proposer.name, msg)
         judge.hear(proposer.name, msg)
         if verbose:
@@ -94,22 +103,24 @@ class DebateCoordinator:
 
         # 交替发言
         for i in range(self.max_rounds):
-            # 批评者
+            # critic
             msg = critic.speak(topic)
             result.rounds.append(
                 DebateRound(i * 2 + 2, critic.name, msg)
             )
+            self.stats.record_speech(critic.name, msg)
             proposer.hear(critic.name, msg)
             judge.hear(critic.name, msg)
             if verbose:
                 print(f"[{critic.name}]\n{msg}\n")
 
-            # 方案提出者回应
+            # proposer回应
             if i < self.max_rounds - 1:
                 msg = proposer.speak(topic)
                 result.rounds.append(
                     DebateRound(i * 2 + 3, proposer.name, msg)
                 )
+                self.stats.record_speech(proposer.name, msg)
                 critic.hear(proposer.name, msg)
                 judge.hear(proposer.name, msg)
                 if verbose:
@@ -125,6 +136,8 @@ class DebateCoordinator:
         )
         verdict = judge.speak(verdict_prompt)
         result.verdict = verdict
+        self.stats.record_verdict(verdict)
+        self.stats.finish()
         if verbose:
             print(f"[{judge.name} -- 最终裁决]\n{verdict}\n")
             print("=" * 50)

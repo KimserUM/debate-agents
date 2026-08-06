@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 tests/demo_*.txt
+tests/custom_roles.json
